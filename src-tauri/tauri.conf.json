@@ -1,0 +1,40 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "OpenCodex",
+  "version": "../package.json",
+  "identifier": "com.opencodex.desktop",
+  "build": {
+    "frontendDist": "bootstrap",
+    "beforeBuildCommand": "bun ../scripts/build-desktop-bootstrap.ts"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "OpenCodex",
+        "width": 420,
+        "height": 250,
+        "resizable": false,
+        "url": "bootstrap.html"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "resources": {
+      "../dist/desktop/windows-x64/runtime": "runtime"
+    },
+    "externalBin": ["../dist/desktop/windows-x64/binaries/bun"],
+    "icon": ["../assets/logo-light.png"],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false
+      }
+    }
+  }
+}

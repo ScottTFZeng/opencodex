@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenCodex</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: light-dark(#ffffff, #212121);
+      --surface: light-dark(#ffffff, #262626);
+      --raised: light-dark(#f4f4f4, #303030);
+      --raised-hover: light-dark(#ececec, #3a3a3a);
+      --border: light-dark(#e6e6e6, #3d3d3d);
+      --text: light-dark(#0d0d0d, #ececec);
+      --muted: light-dark(#6e6e6e, #a6a6a6);
+      --accent: light-dark(#0d0d0d, #ececec);
+      --accent-ink: light-dark(#ffffff, #0d0d0d);
+      --ring: light-dark(rgba(13, 13, 13, 0.18), rgba(255, 255, 255, 0.2));
+      --focus: light-dark(rgba(13, 13, 13, 0.32), rgba(255, 255, 255, 0.42));
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body { width: 100%; height: 100%; overflow: hidden; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "OpenAI Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+
+    main {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      width: 100%;
+      height: 100%;
+      padding: 22px 24px 20px;
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 600;
+      line-height: 20px;
+    }
+
+    .brand-mark {
+      position: relative;
+      width: 20px;
+      height: 20px;
+      border: 1.5px solid currentColor;
+      border-radius: 50%;
+    }
+
+    .brand-mark::after {
+      position: absolute;
+      top: 4px;
+      right: 4px;
+      bottom: 4px;
+      left: 4px;
+      content: "";
+      border: 1.5px solid currentColor;
+      border-radius: 50%;
+    }
+
+    .status-block {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      align-self: center;
+      padding: 10px 0;
+    }
+
+    .spinner {
+      position: relative;
+      width: 28px;
+      height: 28px;
+      flex: 0 0 28px;
+      border: 2px solid var(--ring);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 800ms linear infinite;
+    }
+
+    .spinner.is-failed {
+      border-color: var(--accent);
+      animation: none;
+    }
+
+    .spinner.is-failed::before,
+    .spinner.is-failed::after {
+      position: absolute;
+      top: 12px;
+      left: 6px;
+      width: 12px;
+      height: 1.5px;
+      content: "";
+      background: var(--accent);
+      transform: rotate(45deg);
+    }
+
+    .spinner.is-failed::after { transform: rotate(-45deg); }
+
+    .copy { min-width: 0; }
+
+    h1 {
+      margin: 0 0 4px;
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: 0;
+      line-height: 1.2;
+    }
+
+    #message {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.4;
+    }
+
+    nav {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      min-height: 34px;
+      padding-top: 14px;
+      border-top: 1px solid var(--border);
+    }
+
+    button {
+      min-width: 0;
+      height: 32px;
+      padding: 0 11px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface);
+      color: var(--text);
+      font: inherit;
+      font-size: 12px;
+      font-weight: 500;
+      line-height: 1;
+      white-space: nowrap;
+      cursor: pointer;
+      transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+    }
+
+    button:hover { background: var(--raised-hover); }
+
+    button:focus-visible {
+      outline: 2px solid var(--focus);
+      outline-offset: 2px;
+    }
+
+    button:disabled {
+      cursor: wait;
+      opacity: 0.58;
+    }
+
+    #retry {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: var(--accent-ink);
+    }
+
+    #retry:hover { background: light-dark(#3d3d3d, #ffffff); }
+    #retry:disabled { background: var(--accent); }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    @media (prefers-reduced-motion: reduce) {
+      .spinner { animation-duration: 1.8s; }
+      button { transition: none; }
+    }
+  </style>
+</head>
+<body>
+  <main aria-labelledby="title">
+    <div class="brand" aria-label="OpenCodex">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span>OpenCodex</span>
+    </div>
+
+    <section class="status-block" aria-describedby="message">
+      <span class="spinner" aria-hidden="true"></span>
+      <div class="copy">
+        <h1 id="title">OpenCodex</h1>
+        <p id="message" role="status" aria-live="polite" aria-atomic="true">Starting…</p>
+      </div>
+    </section>
+
+    <nav id="actions" aria-label="Startup actions">
+      <button id="retry" type="button">Retry</button>
+      <button id="logs" type="button">Open Logs</button>
+      <button id="exit" type="button">Exit</button>
+    </nav>
+  </main>
+  <script type="module" src="./bootstrap.js"></script>
+</body>
+</html>

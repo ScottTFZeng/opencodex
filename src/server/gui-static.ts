@@ -16,12 +16,18 @@ const MIME_TYPES: Record<string, string> = {
   ".ico": "image/x-icon",
 };
 
-function findGuiDist(): string | null {
-  const candidates = [
+const GUI_DIST_ENV = "OCX_GUI_DIST";
+
+export function findGuiDist(
+  environment: Record<string, string | undefined> = process.env,
+  candidates = [
     join(import.meta.dir, "..", "..", "gui", "dist"),
     join(import.meta.dir, "..", "..", "..", "gui", "dist"),
-  ];
-  for (const c of candidates) {
+  ],
+): string | null {
+  const override = environment[GUI_DIST_ENV]?.trim();
+  const searchPaths = override ? [override, ...candidates] : candidates;
+  for (const c of searchPaths) {
     if (existsSync(join(c, "index.html"))) return c;
   }
   return null;

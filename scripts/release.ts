@@ -63,6 +63,28 @@ async function readPackageName(): Promise<string> {
   }
 }
 
+async function syncDesktopCargoVersion(version: string): Promise<void> {
+  const manifestPath = "src-tauri/Cargo.toml";
+  const current = await Bun.file(manifestPath).text();
+  const updated = current.replace(/^version\s*=\s*"[^"]+"\s*$/m, `version = "${version}"`);
+  if (updated === current) {
+    console.error("✗ failed to locate the desktop Cargo package version");
+    process.exit(1);
+  }
+  await Bun.write(manifestPath, updated);
+
+  // Cargo.lock records the root package version independently of dependency resolution.
+  // Change only this metadata so a version release cannot refresh transitive dependencies.
+  const lockPath = "src-tauri/Cargo.lock";
+  const lock = await Bun.file(lockPath).text();
+  const lockUpdated = lock.replace(/(\[\[package\]\]\nname = "opencodex-desktop"\nversion = ")[^"]+(")/, `$1${version}$2`);
+  if (lockUpdated === lock) {
+    console.error("✗ failed to locate the desktop package entry in Cargo.lock");
+    process.exit(1);
+  }
+  await Bun.write(lockPath, lockUpdated);
+}
+
 async function npmVersionExists(packageName: string, version: string): Promise<boolean> {
   const result = await runQuiet(["npm", "view", `${packageName}@${version}`, "version"]);
   if (result.exitCode === 0) return true;
@@ -242,12 +264,15 @@ await $`bun test --isolate tests`;
 console.log("→ privacy scan");
 await $`bun run privacy:scan`;
 
-// 2. Bump package.json only; the workflow creates the version tag after npm publish.
-console.log(`→ bump package.json → ${version}`);
+// 2. Bump package/Cargo metadata together. The dependency graph is committed and must not
+// change during a version-only release.
+console.log(`→ bump package.json and desktop Cargo metadata → ${version}`);
 await $`npm version ${version} --no-git-tag-version`;
+await syncDesktopCargoVersion(version);
+await $`cargo check --manifest-path src-tauri/Cargo.toml --locked`;
 
 // 3. Commit + push the version bump.
-await $`git add package.json`;
+await $`git add package.json src-tauri/Cargo.toml src-tauri/Cargo.lock`;
 await $`git commit -m ${`release: v${version}`}`;
 const releaseSha = (await $`git rev-parse HEAD`.text()).trim();
 console.log(`→ push origin ${branch}`);

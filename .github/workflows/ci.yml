@@ -5,14 +5,17 @@ on:
     branches: [main, dev]
     paths:
       - "src/**"
+      - "src-tauri/**"
       - "bin/**"
       - "tests/**"
       - "scripts/**"
       - "gui/**"
+      - "assets/**"
       - ".gitattributes"
       - ".npmignore"
       - "package.json"
       - "bun.lock"
+      - "src-tauri/Cargo.lock"
       - "tsconfig.json"
       - ".github/workflows/ci.yml"
       - ".github/workflows/release.yml"
@@ -21,14 +24,17 @@ on:
     branches: [main, preview, dev]
     paths:
       - "src/**"
+      - "src-tauri/**"
       - "bin/**"
       - "tests/**"
       - "scripts/**"
       - "gui/**"
+      - "assets/**"
       - ".gitattributes"
       - ".npmignore"
       - "package.json"
       - "bun.lock"
+      - "src-tauri/Cargo.lock"
       - "tsconfig.json"
       - ".github/workflows/ci.yml"
       - ".github/workflows/release.yml"
@@ -129,3 +135,148 @@ jobs:
 
       - name: ocx help via bundled bun
         run: ocx help
+
+  desktop-windows:
+    name: Windows desktop installer
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install Rust stable MSVC target
+        shell: pwsh
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-msvc
+          rustup default stable-x86_64-pc-windows-msvc
+          rustup target add x86_64-pc-windows-msvc
+
+      - name: Install Tauri CLI
+        shell: pwsh
+        run: |
+          # Upgrade this reviewed CLI pin together with the locked tauri v2.11 stack.
+          cargo install tauri-cli --version "2.11.1" --locked
+          choco install minisign --yes --no-progress
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          bun install --frozen-lockfile
+          Push-Location "gui"
+          bun install --frozen-lockfile
+          Pop-Location
+
+      - name: Build GUI
+        shell: pwsh
+        run: bun run build:gui
+
+      - name: Verify locked desktop metadata before signing
+        shell: pwsh
+        run: |
+          cargo check --manifest-path "src-tauri\Cargo.toml" --locked
+          bun scripts/desktop-version-metadata.ts
+
+      - name: Build signed updater test installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = node -p "require('./package.json').version"
+          $keyPath = Join-Path $env:RUNNER_TEMP "opencodex-ci-updater.key"
+          try {
+            cargo tauri signer generate -w "$keyPath"
+            $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content "$keyPath" -Raw
+            $env:TAURI_UPDATER_PUBKEY = (Get-Content "$keyPath.pub" -Raw).Trim()
+            $env:TAURI_UPDATER_ENDPOINT = "https://updates.example.invalid/v$version/latest.json"
+            # The feature-gated hook is CI-only; normal/release builds never include it.
+            bun run prepare:desktop-updater
+            bun run prepare:desktop
+            cargo tauri build --manifest-path "src-tauri\Cargo.toml" --config "src-tauri\tauri.updater.release.conf.json" --features desktop-test-hook
+          } finally {
+            Remove-Item -Force -ErrorAction SilentlyContinue "$keyPath"
+          }
+
+      - name: Verify desktop artifacts
+        id: desktop-artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = node -p "require('./package.json').version"
+          bun scripts/desktop-release-artifacts.ts --bundle "src-tauri\target\release\bundle\nsis" --manifest "dist\desktop\windows-x64\manifest.json" --application "src-tauri\target\release\opencodex-desktop.exe" --version "$version" --out "desktop-artifacts.json"
+          $artifacts = Get-Content "desktop-artifacts.json" -Raw | ConvertFrom-Json
+          $pubkey = (Get-Content "$env:RUNNER_TEMP\opencodex-ci-updater.key.pub" -Raw).Trim()
+          try {
+            & "scripts\verify-windows-release-artifacts.ps1" -Installer "$($artifacts.installer)" -Signature "$($artifacts.signature)" -UpdaterPublicKey "$pubkey"
+          } finally {
+            Remove-Item -Force -ErrorAction SilentlyContinue "$env:RUNNER_TEMP\opencodex-ci-updater.key.pub"
+          }
+          "installer=$($artifacts.installer)" >> $env:GITHUB_OUTPUT
+          "signature=$($artifacts.signature)" >> $env:GITHUB_OUTPUT
+          "application=$($artifacts.application)" >> $env:GITHUB_OUTPUT
+          "manifest=$($artifacts.manifest)" >> $env:GITHUB_OUTPUT
+
+      - name: Install, start, health, and exit smoke
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $artifacts = Get-Content "desktop-artifacts.json" -Raw | ConvertFrom-Json
+          Start-Process -FilePath "$($artifacts.installer)" -ArgumentList "/S" -Wait
+          $candidates = @(
+            "$env:LOCALAPPDATA\OpenCodex\OpenCodex.exe",
+            "$env:LOCALAPPDATA\Programs\OpenCodex\OpenCodex.exe"
+          ) | Where-Object { Test-Path $_ }
+          if ($candidates.Count -ne 1) { throw "Expected exactly one installed OpenCodex.exe, found $($candidates.Count)." }
+          $exitRequest = Join-Path $env:RUNNER_TEMP "opencodex-ci-request-shell-exit"
+          Remove-Item -Force -ErrorAction SilentlyContinue "$exitRequest"
+          $env:OCX_DESKTOP_TEST_EXIT_REQUEST = $exitRequest
+          $process = Start-Process -FilePath "$($candidates[0])" -PassThru
+          $runtimePort = Join-Path $env:USERPROFILE ".opencodex\runtime-port.json"
+          $healthy = $false
+          for ($attempt = 0; $attempt -lt 60; $attempt++) {
+            if (Test-Path "$runtimePort") {
+              try {
+                $state = Get-Content "$runtimePort" -Raw | ConvertFrom-Json
+                Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:$($state.port)/healthz" -TimeoutSec 2 | Out-Null
+                $healthy = $true
+                break
+              } catch {}
+            }
+            Start-Sleep -Seconds 1
+          }
+          if (!$healthy) { throw "Installed desktop proxy did not become healthy." }
+          $ownedPid = $state.pid
+          New-Item -ItemType File -Path "$exitRequest" | Out-Null
+          for ($attempt = 0; $attempt -lt 30 -and !$process.HasExited; $attempt++) { Start-Sleep -Seconds 1; $process.Refresh() }
+          if (!$process.HasExited) { throw "Desktop shell did not exit through the CI-only shell-exit hook." }
+          if (Get-Process -Id $ownedPid -ErrorAction SilentlyContinue) { throw "Owned Bun child $ownedPid survived shell exit." }
+          if (Test-Path "$runtimePort") { throw "runtime-port.json survived owned shell exit." }
+          if (Test-Path (Join-Path $env:USERPROFILE ".opencodex\ocx.pid")) { throw "ocx.pid survived owned shell exit." }
+          Remove-Item -Force -ErrorAction SilentlyContinue "$exitRequest"
+
+      - name: Upload verified Windows desktop artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-desktop-ci
+          path: |
+            ${{ steps.desktop-artifacts.outputs.installer }}
+            ${{ steps.desktop-artifacts.outputs.signature }}
+            ${{ steps.desktop-artifacts.outputs.application }}
+            dist\desktop\windows-x64\**
+            desktop-artifacts.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload desktop diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-desktop-ci-diagnostics
+          path: |
+            src-tauri\target\release\build\**\output
+            src-tauri\target\release\bundle\nsis\**\*.log
+          if-no-files-found: warn
+          retention-days: 7

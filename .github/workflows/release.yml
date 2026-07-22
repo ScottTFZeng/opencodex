@@ -35,8 +35,241 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
+  release-preflight:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout release ref without credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Require protected release branch and synchronized version metadata
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          NPM_DIST_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in
+            refs/heads/main)
+              test "$NPM_DIST_TAG" = "latest"
+              case "$RELEASE_VERSION" in *-*) exit 1;; esac
+              ;;
+            refs/heads/preview)
+              test "$NPM_DIST_TAG" = "preview"
+              case "$RELEASE_VERSION" in *-preview.*) ;; *) exit 1;; esac
+              ;;
+            *)
+              echo "::error::Release must run from protected main or preview, not ${GITHUB_REF}."
+              exit 1
+              ;;
+          esac
+          DESKTOP_EXPECTED_VERSION="$RELEASE_VERSION" bun scripts/desktop-version-metadata.ts
+
+  windows-release:
+    needs: [release-preflight]
+    runs-on: windows-latest
+    outputs:
+      rebuild: ${{ steps.resume.outputs.rebuild }}
+    # Configure the protected `windows-release` environment to allow only main/preview.
+    # It holds TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD,
+    # TAURI_UPDATER_PUBKEY, TAURI_UPDATER_ENDPOINT, TAURI_WINDOWS_SIGN_COMMAND,
+    # and TAURI_WINDOWS_SIGNER_IDENTITY (thumbprint:<hex> or exact certificate subject).
+    environment: windows-release
+    permissions:
+      contents: read
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install Minisign for draft resume verification
+        shell: pwsh
+        run: choco install minisign --yes --no-progress
+
+      - name: Inspect matching draft assets for resumable release
+        id: resume
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
+          TAURI_WINDOWS_SIGNER_IDENTITY: ${{ secrets.TAURI_WINDOWS_SIGNER_IDENTITY }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $rebuild = "true"
+          if ($env:DRY_RUN -ne "true") {
+            $tag = "v$($env:RELEASE_VERSION)"
+            git fetch --force --tags origin
+            $tagSha = (git rev-list -n 1 "$tag" 2>$null)
+            if ($tagSha -eq $env:GITHUB_SHA) {
+              $releaseJson = gh release view "$tag" --json isDraft,assets 2>$null
+              if ($LASTEXITCODE -eq 0) {
+                $release = $releaseJson | ConvertFrom-Json
+              }
+              if ($release -and $release.isDraft) {
+                $setup = @($release.assets | Where-Object { $_.name -match "-setup\.exe$" })
+                if ($setup.Count -eq 1 -and ($release.assets.name -contains "$($setup[0].name).sig") -and ($release.assets.name -contains "$($setup[0].name).sha256") -and ($release.assets.name -contains "latest.json")) {
+                  try {
+                    $resumeDirectory = Join-Path $env:RUNNER_TEMP "opencodex-release-resume"
+                    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$resumeDirectory"
+                    New-Item -ItemType Directory -Path "$resumeDirectory" | Out-Null
+                    gh release download "$tag" --pattern "$($setup[0].name)" --pattern "$($setup[0].name).sig" --pattern "$($setup[0].name).sha256" --pattern "latest.json" --dir "$resumeDirectory"
+                    if ($LASTEXITCODE -ne 0) { throw "Could not download existing draft Windows assets." }
+                    $actual = (Get-FileHash (Join-Path $resumeDirectory $setup[0].name) -Algorithm SHA256).Hash.ToLowerInvariant()
+                    $expected = ((Get-Content (Join-Path $resumeDirectory "$($setup[0].name).sha256") -Raw).Split()[0]).ToLowerInvariant()
+                    if ($actual -ne $expected) { throw "Draft installer checksum does not match its published SHA-256 asset." }
+                    & "scripts\verify-windows-release-artifacts.ps1" -Installer (Join-Path $resumeDirectory $setup[0].name) -Signature (Join-Path $resumeDirectory "$($setup[0].name).sig") -UpdaterPublicKey "$env:TAURI_UPDATER_PUBKEY" -VerifyInstallerAuthenticode -ExpectedSignerIdentity "$env:TAURI_WINDOWS_SIGNER_IDENTITY"
+                    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$env:LOCALAPPDATA\OpenCodex", "$env:LOCALAPPDATA\Programs\OpenCodex"
+                    Start-Process -FilePath (Join-Path $resumeDirectory $setup[0].name) -ArgumentList "/S" -Wait
+                    $applications = @(
+                      "$env:LOCALAPPDATA\OpenCodex\OpenCodex.exe",
+                      "$env:LOCALAPPDATA\Programs\OpenCodex\OpenCodex.exe"
+                    ) | Where-Object { Test-Path $_ }
+                    if ($applications.Count -ne 1) { throw "Draft installer did not yield exactly one OpenCodex application executable." }
+                    $installerUrl = "${env:GITHUB_SERVER_URL}/${env:GITHUB_REPOSITORY}/releases/download/$tag/$($setup[0].name)"
+                    & "scripts\verify-windows-release-artifacts.ps1" -Installer (Join-Path $resumeDirectory $setup[0].name) -Signature (Join-Path $resumeDirectory "$($setup[0].name).sig") -UpdaterPublicKey "$env:TAURI_UPDATER_PUBKEY" -Application "$($applications[0])" -ExpectedSignerIdentity "$env:TAURI_WINDOWS_SIGNER_IDENTITY" -LatestJson (Join-Path $resumeDirectory "latest.json") -ExpectedVersion "$env:RELEASE_VERSION" -ExpectedInstallerUrl "$installerUrl"
+                    $rebuild = "false"
+                  } catch {
+                    throw "Existing draft Windows assets failed verification. Do not replace them; publish a new release version."
+                  }
+                } else {
+                  throw "Existing draft Windows assets are incomplete. Do not replace them; publish a new release version."
+                }
+              }
+            }
+          }
+          "rebuild=$rebuild" >> $env:GITHUB_OUTPUT
+
+      - name: Install Rust stable MSVC target and Tauri CLI
+        if: ${{ steps.resume.outputs.rebuild == 'true' }}
+        shell: pwsh
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-msvc
+          rustup default stable-x86_64-pc-windows-msvc
+          rustup target add x86_64-pc-windows-msvc
+          # Upgrade this reviewed CLI pin together with the locked tauri v2.11 stack.
+          cargo install tauri-cli --version "2.11.1" --locked
+
+      - name: Install dependencies and build GUI
+        if: ${{ steps.resume.outputs.rebuild == 'true' }}
+        shell: pwsh
+        run: |
+          bun install --frozen-lockfile
+          Push-Location "gui"
+          bun install --frozen-lockfile
+          Pop-Location
+          bun run build:gui
+
+      - name: Verify locked desktop metadata before any signing material
+        if: ${{ steps.resume.outputs.rebuild == 'true' }}
+        shell: pwsh
+        env:
+          DESKTOP_EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          cargo check --manifest-path "src-tauri\Cargo.toml" --locked
+          bun scripts/desktop-version-metadata.ts
+
+      - name: Build unsigned dry-run Windows updater artifacts
+        if: ${{ inputs.dry-run == true && steps.resume.outputs.rebuild == 'true' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = node -p "require('./package.json').version"
+          $keyPath = Join-Path $env:RUNNER_TEMP "opencodex-dry-run-updater.key"
+          try {
+            cargo tauri signer generate -w "$keyPath"
+            $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content "$keyPath" -Raw
+            $env:TAURI_UPDATER_PUBKEY = (Get-Content "$keyPath.pub" -Raw).Trim()
+            $env:TAURI_UPDATER_ENDPOINT = "https://updates.example.invalid/v$version/latest.json"
+            bun run desktop:build
+          } finally {
+            Remove-Item -Force -ErrorAction SilentlyContinue "$keyPath", "$keyPath.pub"
+          }
+
+      - name: Build Authenticode-signed Windows updater artifacts
+        if: ${{ inputs.dry-run != true && steps.resume.outputs.rebuild == 'true' }}
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
+          TAURI_UPDATER_ENDPOINT: ${{ secrets.TAURI_UPDATER_ENDPOINT }}
+          TAURI_WINDOWS_SIGN_COMMAND: ${{ secrets.TAURI_WINDOWS_SIGN_COMMAND }}
+          TAURI_WINDOWS_SIGNER_IDENTITY: ${{ secrets.TAURI_WINDOWS_SIGNER_IDENTITY }}
+          TAURI_REQUIRE_WINDOWS_SIGN_COMMAND: "1"
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($name in "TAURI_SIGNING_PRIVATE_KEY", "TAURI_UPDATER_PUBKEY", "TAURI_UPDATER_ENDPOINT", "TAURI_WINDOWS_SIGN_COMMAND", "TAURI_WINDOWS_SIGNER_IDENTITY") {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) { throw "$name is required for Windows release artifacts." }
+          }
+          # Tauri runs bundle.windows.signCommand before it produces the updater .sig.
+          bun run desktop:build
+
+      - name: Verify release desktop artifacts
+        if: ${{ steps.resume.outputs.rebuild == 'true' }}
+        id: desktop-artifacts
+        shell: pwsh
+        env:
+          TAURI_WINDOWS_SIGNER_IDENTITY: ${{ secrets.TAURI_WINDOWS_SIGNER_IDENTITY }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          bun scripts/desktop-release-artifacts.ts --bundle "src-tauri\target\release\bundle\nsis" --manifest "dist\desktop\windows-x64\manifest.json" --application "src-tauri\target\release\opencodex-desktop.exe" --version "${{ inputs.version }}" --out "desktop-artifacts.json"
+          $artifacts = Get-Content "desktop-artifacts.json" -Raw | ConvertFrom-Json
+          $updaterConfig = Get-Content "src-tauri\tauri.updater.release.conf.json" -Raw | ConvertFrom-Json
+          $verificationArguments = @{
+            Installer = "$($artifacts.installer)"
+            Signature = "$($artifacts.signature)"
+            UpdaterPublicKey = "$($updaterConfig.plugins.updater.pubkey)"
+          }
+          if ("${{ inputs.dry-run }}" -ne "true") {
+            $verificationArguments.VerifyInstallerAuthenticode = $true
+            $verificationArguments.Application = "$($artifacts.application)"
+            $verificationArguments.ExpectedSignerIdentity = "$env:TAURI_WINDOWS_SIGNER_IDENTITY"
+          }
+          & "scripts\verify-windows-release-artifacts.ps1" @verificationArguments
+          "installer=$($artifacts.installer)" >> $env:GITHUB_OUTPUT
+          "signature=$($artifacts.signature)" >> $env:GITHUB_OUTPUT
+          "application=$($artifacts.application)" >> $env:GITHUB_OUTPUT
+          "manifest=$($artifacts.manifest)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload verified Windows release artifacts
+        if: ${{ steps.resume.outputs.rebuild == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-release-artifacts
+          path: |
+            ${{ steps.desktop-artifacts.outputs.installer }}
+            ${{ steps.desktop-artifacts.outputs.signature }}
+            ${{ steps.desktop-artifacts.outputs.application }}
+            dist\desktop\windows-x64\**
+            desktop-artifacts.json
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [release-preflight, windows-release]
+    if: ${{ always() && needs.release-preflight.result == 'success' && needs.windows-release.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -75,6 +308,13 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Download verified Windows release artifacts
+        if: ${{ inputs.dry-run != true && needs.windows-release.outputs.rebuild == 'true' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: windows-release-artifacts
+          path: windows-release
 
       - name: Verify version matches package.json
         env:
@@ -189,6 +429,11 @@ jobs:
 
           git fetch --force --tags origin
 
+          release_is_draft="false"
+          if gh release view "$release_tag" >/dev/null 2>&1; then
+            release_is_draft="$(gh release view "$release_tag" --json isDraft --jq '.isDraft')"
+          fi
+
           existing_tag_sha="$(git rev-parse -q --verify "refs/tags/${release_tag}^{commit}" || true)"
           if [ -n "$existing_tag_sha" ] && [ "$existing_tag_sha" != "$GITHUB_SHA" ]; then
             echo "::error::${release_tag} already points at ${existing_tag_sha}, not ${GITHUB_SHA}"
@@ -198,15 +443,18 @@ jobs:
           if [ -n "$existing_tag_sha" ]; then
             if [ "$dry_run" = "true" ]; then
               echo "::notice::${release_tag} already exists at this commit; dry-run only"
+            elif [ "$release_is_draft" = "true" ]; then
+              echo "::notice::Resuming draft ${release_tag} at this commit"
             else
-              echo "::error::${release_tag} already exists. Refusing to publish a version with pre-existing Git metadata."
-              exit 1
+              echo "::notice::${release_tag} already exists at this commit without a release; a draft will be created before npm publication"
             fi
           fi
 
           if gh release view "$release_tag" >/dev/null 2>&1; then
             if [ "$dry_run" = "true" ]; then
               echo "::notice::GitHub Release ${release_tag} already exists; dry-run only"
+            elif [ "$release_is_draft" = "true" ]; then
+              echo "::notice::Resuming draft GitHub Release ${release_tag}"
             else
               echo "::error::GitHub Release ${release_tag} already exists. Choose the next unused patch version."
               exit 1
@@ -216,11 +464,77 @@ jobs:
           if npm view "${pkg_name}@${RELEASE_VERSION}" version >/dev/null 2>&1; then
             if [ "$dry_run" = "true" ]; then
               echo "::notice::${pkg_name}@${RELEASE_VERSION} already exists on npm; dry-run only"
+            elif [ "$release_is_draft" = "true" ]; then
+              echo "NPM_RELEASE_ALREADY_PUBLISHED=true" >> "$GITHUB_ENV"
+              echo "::notice::npm version already exists while resuming draft ${release_tag}"
             else
               echo "::error::${pkg_name}@${RELEASE_VERSION} already exists on npm. Choose the next unused patch version."
               exit 1
             fi
           fi
+
+      - name: Stage verified desktop assets in a draft release
+        if: ${{ inputs.dry-run != true && needs.windows-release.outputs.rebuild == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          release_tag="v${RELEASE_VERSION}"
+          git fetch --force --tags origin
+          manifest="$(find windows-release -path '*/dist/desktop/windows-x64/manifest.json' -type f -print -quit)"
+          test -n "$manifest" || { echo "::error::missing downloaded staged runtime manifest"; exit 1; }
+          application="$(find windows-release -type f -name opencodex-desktop.exe -print -quit)"
+          test -n "$application" || { echo "::error::missing downloaded OpenCodex application executable"; exit 1; }
+          bun scripts/desktop-release-artifacts.ts --bundle "windows-release" --manifest "$manifest" --application "$application" --version "$RELEASE_VERSION" --out "windows-release/artifacts.json"
+          installer="$(node -p "require('./windows-release/artifacts.json').installer")"
+          signature="$(node -p "require('./windows-release/artifacts.json').signature")"
+          installer_name="$(node -p "require('./windows-release/artifacts.json').installerName")"
+          existing_tag_sha="$(git rev-parse -q --verify "refs/tags/${release_tag}^{commit}" || true)"
+          if [ -n "$existing_tag_sha" ] && [ "$existing_tag_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::${release_tag} already points at ${existing_tag_sha}, not ${GITHUB_SHA}"
+            exit 1
+          fi
+          if [ -z "$existing_tag_sha" ]; then
+            git tag "$release_tag" "$GITHUB_SHA"
+            git push origin "refs/tags/${release_tag}"
+          fi
+
+          checksum="windows-release/${installer_name}.sha256"
+          printf '%s  %s\n' "$(node -p "require('./windows-release/artifacts.json').sha256")" "$installer_name" > "$checksum"
+          export DESKTOP_RELEASE_VERSION="$RELEASE_VERSION"
+          export DESKTOP_INSTALLER_NAME="$installer_name"
+          export DESKTOP_INSTALLER_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${release_tag}/${installer_name}"
+          export DESKTOP_INSTALLER_SIG_PATH="$signature"
+          export DESKTOP_LATEST_JSON_PATH="windows-release/latest.json"
+          bun scripts/desktop-latest-json.ts
+
+          if gh release view "$release_tag" >/dev/null 2>&1; then
+            test "$(gh release view "$release_tag" --json isDraft --jq '.isDraft')" = "true" || { echo "::error::${release_tag} is already published"; exit 1; }
+          else
+            gh release create "$release_tag" --target "$GITHUB_SHA" --title "$release_tag" --notes "Windows desktop assets staged before npm publication." --draft
+          fi
+
+          ensure_asset() {
+            local asset_path="$1"
+            local asset_name
+            asset_name="$(basename "$asset_path")"
+            if gh release view "$release_tag" --json assets --jq '.assets[].name' | grep -Fx "$asset_name" >/dev/null; then
+              local existing_dir
+              existing_dir="$(mktemp -d)"
+              gh release download "$release_tag" --pattern "$asset_name" --dir "$existing_dir"
+              test "$(sha256sum "$asset_path" | cut -d' ' -f1)" = "$(sha256sum "$existing_dir/$asset_name" | cut -d' ' -f1)" || {
+                echo "::error::draft asset ${asset_name} does not match the verified build"
+                exit 1
+              }
+            else
+              gh release upload "$release_tag" "$asset_path"
+            fi
+          }
+          ensure_asset "$installer"
+          ensure_asset "$signature"
+          ensure_asset "$checksum"
+          ensure_asset "windows-release/latest.json"
 
       - name: Publish (or dry-run)
         env:
@@ -231,6 +545,8 @@ jobs:
             echo "::notice::DRY RUN — building + packing, not publishing"
             npm run prepublishOnly
             npm pack --dry-run
+          elif [ "$NPM_RELEASE_ALREADY_PUBLISHED" = "true" ]; then
+            echo "::notice::npm publish already completed; resuming draft asset publication"
           else
             npm publish --tag "$NPM_DIST_TAG" --access public
           fi
@@ -255,12 +571,13 @@ jobs:
           npm view @bitkyc08/opencodex versions dist-tags --json || true
           exit 1
 
-      - name: Create GitHub release
+      - name: Publish verified Windows installer release
         if: ${{ inputs.dry-run != true }}
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.version }}
           NPM_DIST_TAG: ${{ inputs.tag }}
+          WINDOWS_REBUILD: ${{ needs.windows-release.outputs.rebuild }}
         run: |
           set -euo pipefail
 
@@ -306,11 +623,6 @@ jobs:
             printf '\n- Release version bump only.\n' >> "$notes_file"
           fi
 
-          if [ -z "$existing_tag_sha" ]; then
-            git tag "$release_tag" "$GITHUB_SHA"
-            git push origin "refs/tags/${release_tag}"
-          fi
-
           # Preview builds must be marked prerelease so GitHub "latest" keeps pointing at the
           # stable channel (matching npm dist-tags); see issue #64.
           prerelease_flag=""
@@ -318,8 +630,27 @@ jobs:
             prerelease_flag="--prerelease"
           fi
 
-          if gh release view "$release_tag" >/dev/null 2>&1; then
-            gh release edit "$release_tag" --title "$release_tag" --notes-file "$notes_file" ${prerelease_flag:+$prerelease_flag}
+          test "$(gh release view "$release_tag" --json isDraft --jq '.isDraft')" = "true" || {
+            echo "::error::${release_tag} must remain a draft until npm and desktop assets are verified"
+            exit 1
+          }
+          asset_names="$(gh release view "$release_tag" --json assets --jq '.assets[].name')"
+          if [ "$WINDOWS_REBUILD" = "true" ]; then
+            manifest="$(find windows-release -path '*/dist/desktop/windows-x64/manifest.json' -type f -print -quit)"
+            test -n "$manifest" || { echo "::error::downloaded Windows release artifact is missing manifest.json"; exit 1; }
+            application="$(find windows-release -type f -name opencodex-desktop.exe -print -quit)"
+            test -n "$application" || { echo "::error::downloaded Windows release artifact is missing OpenCodex application executable"; exit 1; }
+            bun scripts/desktop-release-artifacts.ts --bundle "windows-release" --manifest "$manifest" --application "$application" --version "$RELEASE_VERSION" --out "windows-release/artifacts.json"
+            installer_name="$(node -p "require('./windows-release/artifacts.json').installerName")"
           else
-            gh release create "$release_tag" --target "$GITHUB_SHA" --title "$release_tag" --notes-file "$notes_file" ${prerelease_flag:+$prerelease_flag}
+            setup_assets="$(printf '%s\n' "$asset_names" | grep -- '-setup\.exe$' || true)"
+            test "$(printf '%s\n' "$setup_assets" | sed '/^$/d' | wc -l | tr -d ' ')" = "1" || { echo "::error::draft must have exactly one NSIS setup executable"; exit 1; }
+            installer_name="$setup_assets"
           fi
+          for asset in "$installer_name" "${installer_name}.sig" "${installer_name}.sha256" "latest.json"; do
+            printf '%s\n' "$asset_names" | grep -Fx "$asset" >/dev/null || {
+              echo "::error::draft ${release_tag} is missing ${asset}"
+              exit 1
+            }
+          done
+          gh release edit "$release_tag" --title "$release_tag" --notes-file "$notes_file" --draft=false ${prerelease_flag:+$prerelease_flag}

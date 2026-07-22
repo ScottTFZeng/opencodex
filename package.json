@@ -42,6 +42,13 @@
     "generate:jawcode-metadata": "bun scripts/generate-jawcode-metadata.ts",
     "build:gui": "cd gui && bun install --frozen-lockfile && bun run build && cd .. && bun run prepare:package",
     "prepare:package": "bun scripts/prepare-package.ts",
+    "prepare:desktop": "bun scripts/build-desktop-bootstrap.ts && bun scripts/prepare-desktop.ts",
+    "prepare:desktop-updater": "bun scripts/desktop-updater-config.ts",
+    "verify:desktop-artifacts": "bun scripts/desktop-release-artifacts.ts",
+    "generate:desktop-latest": "bun scripts/desktop-latest-json.ts",
+    "verify:desktop-version": "bun scripts/desktop-version-metadata.ts",
+    "desktop:test": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "desktop:build": "bun run prepare:desktop-updater && bun run prepare:desktop && cargo tauri build --manifest-path src-tauri/Cargo.toml --config src-tauri/tauri.updater.release.conf.json",
     "prepack": "bun run prepare:package",
     "prepublishOnly": "bun run typecheck && bun run build:gui",
     "release": "bun scripts/release.ts",
@@ -60,6 +67,7 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@tauri-apps/api": "^2.0.0",
     "@types/bun": "1.3.14",
     "typescript": "5.9.3"
   },

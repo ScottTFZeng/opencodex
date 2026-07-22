@@ -14,3 +14,7 @@ devlog/
 # Test-generated artifacts
 tests/.tmp-*/
 .claude/
+src-tauri/bootstrap/bootstrap.js
+src-tauri/tauri.updater.release.conf.json
+src-tauri/target/
+src-tauri/gen/

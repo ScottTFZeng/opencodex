@@ -21,6 +21,7 @@ import {
 } from "../config";
 import { collectStatus } from "./status";
 import { installCrashGuards } from "../lib/crash-guard";
+import { watchDesktopShutdownRequest } from "../lib/desktop-lifecycle";
 import { hasHelpFlag, printSubcommandUsage, printUsage, printVersion } from "./help";
 import { findAvailablePort, isAddrInUse, PortUnavailableError, shouldPersistSelectedPort, waitForPortAvailable } from "../server/ports";
 import { findLiveProxy, probeHostname, type LiveProxy } from "../server/proxy-liveness";
@@ -237,6 +238,8 @@ async function handleStart(options: { block?: boolean } = {}) {
   // gracefully here so it drains + cleans up instead of a default immediate kill.
   process.on("SIGHUP", shutdown);
   process.on("exit", syncCleanup);
+  const stopDesktopControlWatcher = watchDesktopShutdownRequest(shutdown);
+  process.on("exit", stopDesktopControlWatcher);
 
   // System-wide env injection AFTER signal handlers are registered (crash safety:
   // syncCleanup reverts even if injection itself or subsequent startup steps fail).
