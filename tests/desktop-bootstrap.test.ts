@@ -4,6 +4,12 @@ import { resolveDesktopUpdaterConfig, validateDesktopUpdaterEndpoint, validateDe
 import { validateDesktopBootstrapSource } from "../scripts/build-desktop-bootstrap";
 
 describe("desktop bootstrap boundary", () => {
+  test("tracks the Tauri Windows default window and tray icon", () => {
+    const icon = readFileSync("src-tauri/icons/icon.ico");
+    expect(icon.subarray(0, 4)).toEqual(Buffer.from([0, 0, 1, 0]));
+    expect(icon.readUInt16LE(4)).toBeGreaterThanOrEqual(4);
+  });
+
   test("uses the bundled API client instead of the global bridge", () => {
     const source = readFileSync("src-tauri/bootstrap/bootstrap.ts", "utf8");
     expect(() => validateDesktopBootstrapSource(source)).not.toThrow();
