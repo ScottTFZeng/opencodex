@@ -48,7 +48,7 @@
     "generate:desktop-latest": "bun scripts/desktop-latest-json.ts",
     "verify:desktop-version": "bun scripts/desktop-version-metadata.ts",
     "desktop:test": "cargo test --manifest-path src-tauri/Cargo.toml",
-    "desktop:build": "bun run prepare:desktop-updater && bun run prepare:desktop && cargo tauri build --manifest-path src-tauri/Cargo.toml --config src-tauri/tauri.updater.release.conf.json",
+    "desktop:build": "bun run prepare:desktop-updater && bun run prepare:desktop && (cd src-tauri && cargo tauri build --config tauri.updater.release.conf.json)",
     "prepack": "bun run prepare:package",
     "prepublishOnly": "bun run typecheck && bun run build:gui",
     "release": "bun scripts/release.ts",

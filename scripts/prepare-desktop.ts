@@ -61,6 +61,34 @@ function pathsOverlap(a: string, b: string): boolean {
   return a === b || a.startsWith(`${b}${sep}`) || b.startsWith(`${a}${sep}`);
 }
 
+function isAllowedStagingRoot(sourceRoot: string, path: string): boolean {
+  const outputRoot = join(sourceRoot, "dist", "desktop", "windows-x64");
+  return path === outputRoot || path === `${outputRoot}.install`;
+}
+
+function assertStagingPathHasNoSymlinks(sourceRoot: string, path: string): void {
+  const relativePath = relative(sourceRoot, path);
+  if (relativePath === ".." || relativePath.startsWith(`..${sep}`)) {
+    throw new Error(`Desktop staging path escapes the source root: ${path}`);
+  }
+
+  let current = sourceRoot;
+  if (lstatSync(current).isSymbolicLink()) {
+    throw new Error(`Symlinks or junctions are not allowed in desktop staging paths: ${current}`);
+  }
+  for (const segment of relativePath.split(sep).filter(Boolean)) {
+    current = join(current, segment);
+    try {
+      if (lstatSync(current).isSymbolicLink()) {
+        throw new Error(`Symlinks or junctions are not allowed in desktop staging paths: ${current}`);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+  }
+}
+
 function readPackage(path: string): PackageMetadata {
   return JSON.parse(readFileSync(path, "utf8")) as PackageMetadata;
 }
@@ -213,11 +241,18 @@ export function stageDesktopRuntime(options: StageDesktopRuntimeOptions = {}): D
   if (platform !== "win32") {
     throw new Error("Windows desktop runtime staging must run on Windows so Bun resolves the Windows x64 binary.");
   }
-  if (pathsOverlap(sourceRoot, outputRoot) || pathsOverlap(sourceRoot, installRoot)) {
+  if ((pathsOverlap(sourceRoot, outputRoot) && !isAllowedStagingRoot(sourceRoot, outputRoot))
+    || (pathsOverlap(sourceRoot, installRoot) && !isAllowedStagingRoot(sourceRoot, installRoot))) {
     throw new Error("Desktop output and install roots must not overlap the source root.");
   }
   if (installRoot === outputRoot || installRoot.startsWith(`${outputRoot}${sep}`) || outputRoot.startsWith(`${installRoot}${sep}`)) {
     throw new Error("Desktop install and output roots must not overlap.");
+  }
+  if (isAllowedStagingRoot(sourceRoot, outputRoot)) {
+    assertStagingPathHasNoSymlinks(sourceRoot, outputRoot);
+  }
+  if (isAllowedStagingRoot(sourceRoot, installRoot)) {
+    assertStagingPathHasNoSymlinks(sourceRoot, installRoot);
   }
 
   const packagePath = join(sourceRoot, "package.json");

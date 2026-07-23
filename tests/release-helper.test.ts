@@ -1,5 +1,5 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -28,7 +28,7 @@ function writeExecutable(path: string, contents: string): void {
   chmodSync(path, 0o755);
 }
 
-function shimProgramSource(name: "bun" | "gh" | "git" | "npm"): string {
+function shimProgramSource(name: "bun" | "cargo" | "gh" | "git" | "npm"): string {
   if (name === "bun") {
     return `import { appendFileSync } from "node:fs";
 
@@ -113,6 +113,15 @@ process.exit(1);
 `;
   }
 
+  if (name === "cargo") {
+    return `import { appendFileSync } from "node:fs";
+
+const args = process.argv.slice(2);
+appendFileSync(process.env.FAKE_RELEASE_LOG, JSON.stringify({ name: "cargo", args }) + "\\n");
+process.exit(0);
+`;
+  }
+
   return `import { appendFileSync } from "node:fs";
 
 const args = process.argv.slice(2);
@@ -157,7 +166,7 @@ process.exit(1);
 `;
 }
 
-function installCommandShim(binDir: string, name: "bun" | "gh" | "git" | "npm"): void {
+function installCommandShim(binDir: string, name: "bun" | "cargo" | "gh" | "git" | "npm"): void {
   const jsPath = join(binDir, `${name}.js`);
   const launcherPath = join(binDir, name);
   const cmdPath = join(binDir, `${name}.cmd`);
@@ -179,31 +188,38 @@ function findCallIndex(calls: LoggedCall[], name: string, matcher: (call: Logged
 
 function runRelease(version: string, scenario: ReleaseScenario = {}) {
   const shimDir = mkdtempSync(join(tmpdir(), "ocx-release-helper-"));
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "ocx-release-fixture-"));
   const logPath = join(shimDir, "release-log.jsonl");
   writeFileSync(logPath, "", "utf8");
+  writeFileSync(join(fixtureRoot, "package.json"), JSON.stringify({ name: "opencodex-release-fixture", version: "2.7.33" }), "utf8");
+  mkdirSync(join(fixtureRoot, "src-tauri"));
+  writeFileSync(join(fixtureRoot, "src-tauri", "Cargo.toml"), '[package]\nname = "opencodex-desktop"\nversion = "2.7.33"\n', "utf8");
+  writeFileSync(join(fixtureRoot, "src-tauri", "Cargo.lock"), '[[package]]\nname = "opencodex-desktop"\nversion = "2.7.33"\n', "utf8");
 
-  for (const name of ["bun", "gh", "git", "npm"] as const) {
+  for (const name of ["bun", "cargo", "gh", "git", "npm"] as const) {
     installCommandShim(shimDir, name);
   }
 
-  const result = spawnSync(process.execPath, [releaseScriptPath, version], {
-    cwd: repoRoot,
-    env: {
-      ...process.env,
-      PATH: `${shimDir}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
-      FAKE_RELEASE_LOG: logPath,
-      FAKE_GIT_BRANCH: scenario.branch ?? "main",
-      FAKE_GIT_HEAD_SHA: scenario.headSha ?? "abc123def456",
-      FAKE_BUN_TSC_EXIT_CODE: String(scenario.typecheckExitCode ?? 0),
-      FAKE_BUN_TEST_EXIT_CODE: String(scenario.testExitCode ?? 0),
-      FAKE_BUN_PRIVACY_EXIT_CODE: String(scenario.privacyExitCode ?? 0),
-    },
-    encoding: "utf8",
-  });
-
-  const calls = readLoggedCalls(logPath);
-  rmSync(shimDir, { recursive: true, force: true });
-  return { calls, result };
+  try {
+    const result = spawnSync(process.execPath, [releaseScriptPath, version], {
+      cwd: fixtureRoot,
+      env: {
+        ...process.env,
+        PATH: `${shimDir}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
+        FAKE_RELEASE_LOG: logPath,
+        FAKE_GIT_BRANCH: scenario.branch ?? "main",
+        FAKE_GIT_HEAD_SHA: scenario.headSha ?? "abc123def456",
+        FAKE_BUN_TSC_EXIT_CODE: String(scenario.typecheckExitCode ?? 0),
+        FAKE_BUN_TEST_EXIT_CODE: String(scenario.testExitCode ?? 0),
+        FAKE_BUN_PRIVACY_EXIT_CODE: String(scenario.privacyExitCode ?? 0),
+      },
+      encoding: "utf8",
+    });
+    return { calls: readLoggedCalls(logPath), result };
+  } finally {
+    rmSync(shimDir, { recursive: true, force: true });
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
 }
 
 describe("release helper", () => {
@@ -228,6 +244,7 @@ describe("release helper", () => {
     expect(testIndex).toBeGreaterThan(typecheckIndex);
     expect(privacyIndex).toBeGreaterThan(testIndex);
     expect(versionIndex).toBeGreaterThan(privacyIndex);
+    expect(findCallIndex(calls, "cargo", call => call.args.join(" ") === "check --manifest-path src-tauri/Cargo.toml --locked")).toBeGreaterThan(versionIndex);
     expect(dispatchIndex).toBeGreaterThan(versionIndex);
   });
 

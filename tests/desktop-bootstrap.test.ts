@@ -36,6 +36,8 @@ describe("desktop updater release config", () => {
   test("desktop builds generate the updater config before staging or invoking Tauri", () => {
     const packageJson = JSON.parse(readFileSync("package.json", "utf8"));
     expect(packageJson.scripts["desktop:build"]).toContain("prepare:desktop-updater");
-    expect(packageJson.scripts["desktop:build"]).toContain("--config src-tauri/tauri.updater.release.conf.json");
+    expect(packageJson.scripts["desktop:build"]).toContain("cd src-tauri");
+    expect(packageJson.scripts["desktop:build"]).toContain("--config tauri.updater.release.conf.json");
+    expect(packageJson.scripts["desktop:build"]).not.toContain("--config src-tauri/tauri.updater.release.conf.json");
   });
 });

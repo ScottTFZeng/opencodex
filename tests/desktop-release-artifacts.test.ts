@@ -25,9 +25,10 @@ function writeManifest(path: string): void {
 
 describe("desktop release artifacts", () => {
   test("keeps package, Cargo, and Tauri version sources aligned", () => {
-    expect(assertDesktopVersionMetadata("2.7.31")).toEqual({
-      packageVersion: "2.7.31",
-      cargoVersion: "2.7.31",
+    const packageVersion = JSON.parse(readFileSync("package.json", "utf8")).version;
+    expect(assertDesktopVersionMetadata(packageVersion)).toEqual({
+      packageVersion,
+      cargoVersion: packageVersion,
       tauriVersionSource: "../package.json",
     });
   });

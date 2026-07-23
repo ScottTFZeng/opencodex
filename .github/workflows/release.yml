@@ -99,7 +99,10 @@ jobs:
 
       - name: Install Minisign for draft resume verification
         shell: pwsh
-        run: choco install minisign --yes --no-progress
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          choco install minisign --yes --no-progress
 
       - name: Inspect matching draft assets for resumable release
         id: resume
@@ -112,14 +115,19 @@ jobs:
           TAURI_WINDOWS_SIGNER_IDENTITY: ${{ secrets.TAURI_WINDOWS_SIGNER_IDENTITY }}
         run: |
           $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           $rebuild = "true"
           if ($env:DRY_RUN -ne "true") {
             $tag = "v$($env:RELEASE_VERSION)"
             git fetch --force --tags origin
             $tagSha = (git rev-list -n 1 "$tag" 2>$null)
             if ($tagSha -eq $env:GITHUB_SHA) {
+              # A missing draft release is an expected probe result, not a step failure.
+              $PSNativeCommandUseErrorActionPreference = $false
               $releaseJson = gh release view "$tag" --json isDraft,assets 2>$null
-              if ($LASTEXITCODE -eq 0) {
+              $releaseViewExitCode = $LASTEXITCODE
+              $PSNativeCommandUseErrorActionPreference = $true
+              if ($releaseViewExitCode -eq 0) {
                 $release = $releaseJson | ConvertFrom-Json
               }
               if ($release -and $release.isDraft) {
@@ -160,6 +168,8 @@ jobs:
         if: ${{ steps.resume.outputs.rebuild == 'true' }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           rustup toolchain install stable-x86_64-pc-windows-msvc
           rustup default stable-x86_64-pc-windows-msvc
           rustup target add x86_64-pc-windows-msvc
@@ -170,6 +180,8 @@ jobs:
         if: ${{ steps.resume.outputs.rebuild == 'true' }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           bun install --frozen-lockfile
           Push-Location "gui"
           bun install --frozen-lockfile
@@ -182,6 +194,9 @@ jobs:
         env:
           DESKTOP_EXPECTED_VERSION: ${{ inputs.version }}
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          bun run prepare:desktop
           cargo check --manifest-path "src-tauri\Cargo.toml" --locked
           bun scripts/desktop-version-metadata.ts
 
@@ -190,6 +205,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           $version = node -p "require('./package.json').version"
           $keyPath = Join-Path $env:RUNNER_TEMP "opencodex-dry-run-updater.key"
           try {
@@ -215,6 +231,7 @@ jobs:
           TAURI_REQUIRE_WINDOWS_SIGN_COMMAND: "1"
         run: |
           $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           foreach ($name in "TAURI_SIGNING_PRIVATE_KEY", "TAURI_UPDATER_PUBKEY", "TAURI_UPDATER_ENDPOINT", "TAURI_WINDOWS_SIGN_COMMAND", "TAURI_WINDOWS_SIGNER_IDENTITY") {
             if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) { throw "$name is required for Windows release artifacts." }
           }
@@ -227,9 +244,12 @@ jobs:
         shell: pwsh
         env:
           TAURI_WINDOWS_SIGNER_IDENTITY: ${{ secrets.TAURI_WINDOWS_SIGNER_IDENTITY }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          DRY_RUN: ${{ inputs.dry-run }}
         run: |
           $ErrorActionPreference = "Stop"
-          bun scripts/desktop-release-artifacts.ts --bundle "src-tauri\target\release\bundle\nsis" --manifest "dist\desktop\windows-x64\manifest.json" --application "src-tauri\target\release\opencodex-desktop.exe" --version "${{ inputs.version }}" --out "desktop-artifacts.json"
+          $PSNativeCommandUseErrorActionPreference = $true
+          bun scripts/desktop-release-artifacts.ts --bundle "src-tauri\target\release\bundle\nsis" --manifest "dist\desktop\windows-x64\manifest.json" --application "src-tauri\target\release\opencodex-desktop.exe" --version "$env:RELEASE_VERSION" --out "desktop-artifacts.json"
           $artifacts = Get-Content "desktop-artifacts.json" -Raw | ConvertFrom-Json
           $updaterConfig = Get-Content "src-tauri\tauri.updater.release.conf.json" -Raw | ConvertFrom-Json
           $verificationArguments = @{
@@ -237,7 +257,7 @@ jobs:
             Signature = "$($artifacts.signature)"
             UpdaterPublicKey = "$($updaterConfig.plugins.updater.pubkey)"
           }
-          if ("${{ inputs.dry-run }}" -ne "true") {
+          if ($env:DRY_RUN -ne "true") {
             $verificationArguments.VerifyInstallerAuthenticode = $true
             $verificationArguments.Application = "$($artifacts.application)"
             $verificationArguments.ExpectedSignerIdentity = "$env:TAURI_WINDOWS_SIGNER_IDENTITY"

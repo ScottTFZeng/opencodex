@@ -110,8 +110,12 @@ describe("desktop runtime staging", () => {
     const cases = [
       { outputRoot: source, installRoot: sibling },
       { outputRoot: sibling, installRoot: source },
-      { outputRoot: join(source, "output"), installRoot: sibling },
+      { outputRoot: join(source, "dist"), installRoot: sibling },
+      { outputRoot: join(source, "dist", "desktop"), installRoot: sibling },
+      { outputRoot: join(source, "other-output"), installRoot: sibling },
       { outputRoot: sibling, installRoot: join(source, "install") },
+      { outputRoot: sibling, installRoot: join(source, "dist") },
+      { outputRoot: sibling, installRoot: join(source, "dist", "desktop") },
       { outputRoot: tmp, installRoot: sibling },
       { outputRoot: sibling, installRoot: tmp },
     ];
@@ -127,6 +131,64 @@ describe("desktop runtime staging", () => {
       })).toThrow("must not overlap the source root");
       expect(existsSync(join(source, "package.json"))).toBe(true);
       expect(runner.commands).toHaveLength(0);
+    }
+  });
+
+  test("allows only the repository-local desktop staging roots under the source", () => {
+    const source = join(tmp, "allowed-staging-source");
+    const output = join(source, "dist", "desktop", "windows-x64");
+    writeFixtureSource(source);
+
+    const manifest = stageDesktopRuntime({
+      sourceRoot: source,
+      outputRoot: output,
+      installRoot: `${output}.install`,
+      platform: "win32",
+      runCommand: fixtureCommandRunner().runCommand,
+    });
+
+    expect(manifest.version).toBe("2.0.0");
+    expect(existsSync(join(output, "manifest.json"))).toBe(true);
+  });
+
+  test("rejects an allowed lexical staging root with a symlinked dist ancestor before cleanup", () => {
+    const source = join(tmp, "symlinked-staging-source");
+    const outside = join(tmp, "symlinked-staging-outside");
+    const output = join(source, "dist", "desktop", "windows-x64");
+    const sentinel = join(outside, "sentinel.txt");
+    const runner = fixtureCommandRunner();
+    writeFixtureSource(source);
+    write(sentinel, "must not be deleted\n");
+    symlinkSync(outside, join(source, "dist"), "dir");
+
+    expect(() => stageDesktopRuntime({
+      sourceRoot: source,
+      outputRoot: output,
+      installRoot: `${output}.install`,
+      platform: "win32",
+      runCommand: runner.runCommand,
+    })).toThrow("Symlinks or junctions are not allowed in desktop staging paths");
+    expect(readFileSync(sentinel, "utf8")).toBe("must not be deleted\n");
+    expect(runner.commands).toHaveLength(0);
+  });
+
+  test("rejects descendants of the allowed staging roots that could be deleted during staging", () => {
+    const source = join(tmp, "staging-descendant-source");
+    const output = join(source, "dist", "desktop", "windows-x64");
+    writeFixtureSource(source);
+
+    for (const paths of [
+      { outputRoot: output, installRoot: join(output, "install") },
+      { outputRoot: join(output, "nested"), installRoot: `${output}.install` },
+      { outputRoot: output, installRoot: join(`${output}.install`, "nested") },
+    ]) {
+      expect(() => stageDesktopRuntime({
+        sourceRoot: source,
+        outputRoot: paths.outputRoot,
+        installRoot: paths.installRoot,
+        platform: "win32",
+        runCommand: fixtureCommandRunner().runCommand,
+      })).toThrow("must not overlap");
     }
   });
 

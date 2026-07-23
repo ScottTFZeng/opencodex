@@ -152,6 +152,8 @@ jobs:
       - name: Install Rust stable MSVC target
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           rustup toolchain install stable-x86_64-pc-windows-msvc
           rustup default stable-x86_64-pc-windows-msvc
           rustup target add x86_64-pc-windows-msvc
@@ -159,6 +161,8 @@ jobs:
       - name: Install Tauri CLI
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           # Upgrade this reviewed CLI pin together with the locked tauri v2.11 stack.
           cargo install tauri-cli --version "2.11.1" --locked
           choco install minisign --yes --no-progress
@@ -166,6 +170,8 @@ jobs:
       - name: Install dependencies
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           bun install --frozen-lockfile
           Push-Location "gui"
           bun install --frozen-lockfile
@@ -173,11 +179,17 @@ jobs:
 
       - name: Build GUI
         shell: pwsh
-        run: bun run build:gui
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          bun run build:gui
 
       - name: Verify locked desktop metadata before signing
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          bun run prepare:desktop
           cargo check --manifest-path "src-tauri\Cargo.toml" --locked
           bun scripts/desktop-version-metadata.ts
 
@@ -185,6 +197,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           $version = node -p "require('./package.json').version"
           $keyPath = Join-Path $env:RUNNER_TEMP "opencodex-ci-updater.key"
           try {
@@ -195,7 +208,9 @@ jobs:
             # The feature-gated hook is CI-only; normal/release builds never include it.
             bun run prepare:desktop-updater
             bun run prepare:desktop
-            cargo tauri build --manifest-path "src-tauri\Cargo.toml" --config "src-tauri\tauri.updater.release.conf.json" --features desktop-test-hook
+            Push-Location "src-tauri"
+            cargo tauri build --config "tauri.updater.release.conf.json" --features desktop-test-hook
+            Pop-Location
           } finally {
             Remove-Item -Force -ErrorAction SilentlyContinue "$keyPath"
           }
@@ -205,6 +220,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           $version = node -p "require('./package.json').version"
           bun scripts/desktop-release-artifacts.ts --bundle "src-tauri\target\release\bundle\nsis" --manifest "dist\desktop\windows-x64\manifest.json" --application "src-tauri\target\release\opencodex-desktop.exe" --version "$version" --out "desktop-artifacts.json"
           $artifacts = Get-Content "desktop-artifacts.json" -Raw | ConvertFrom-Json
@@ -223,6 +239,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           $artifacts = Get-Content "desktop-artifacts.json" -Raw | ConvertFrom-Json
           Start-Process -FilePath "$($artifacts.installer)" -ArgumentList "/S" -Wait
           $candidates = @(
